@@ -36,6 +36,8 @@
 
 #include <SDL_vulkan.h>
 
+#include <cstdlib>
+
 #ifdef __APPLE__
 #include <mvk_config.h>
 #include <vulkan/vulkan_beta.h>
@@ -75,6 +77,37 @@ decltype(AHardwareBuffer_lock) *_AHardwareBuffer_lock;
 decltype(AHardwareBuffer_unlock) *_AHardwareBuffer_unlock;
 decltype(AHardwareBuffer_release) *_AHardwareBuffer_release;
 #endif
+
+
+static bool env_truthy(const char *name) {
+    const char *value = std::getenv(name);
+    if (!value)
+        return false;
+    return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' || value[0] == 't' || value[0] == 'T';
+}
+
+static std::optional<renderer::MappingMethod> parse_mapping_override(const char *value) {
+    if (!value || !*value)
+        return std::nullopt;
+
+    std::string_view v(value);
+    if (v == "disabled")
+        return renderer::MappingMethod::Disabled;
+    if (v == "double-buffer")
+        return renderer::MappingMethod::DoubleBuffer;
+    if (v == "external-host")
+        return renderer::MappingMethod::ExernalHost;
+    if (v == "page-table")
+        return renderer::MappingMethod::PageTable;
+    if (v == "native-buffer")
+        return renderer::MappingMethod::NativeBuffer;
+    return std::nullopt;
+}
+
+static bool is_tegra_like_device(const vk::PhysicalDeviceProperties &props) {
+    const std::string_view name(props.deviceName);
+    return props.vendorID == 4318 || name.find("Tegra") != std::string_view::npos || name.find("NVIDIA") != std::string_view::npos;
+}
 
 static void debug_log_message(std::string_view msg) {
     static const char *ignored_errors[] = {
@@ -574,6 +607,13 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
         support_unix_fd_import &= SDL_GetAndroidSDKVersion() >= 26;
 #endif
 
+        const bool unsafe_tegra_mapping_override = env_truthy("VITA3K_UNSAFE_TEGRA_MAPPING") || is_tegra_like_device(physical_device_properties);
+        const auto forced_mapping_override = parse_mapping_override(std::getenv("VITA3K_FORCE_MAPPING_METHOD"));
+        if (unsafe_tegra_mapping_override) {
+            LOG_WARN("Unsafe Tegra mapping override active. Exposing Vulkan memory mapping methods even if the driver did not advertise full support.");
+            support_memory_mapping = true;
+        }
+
         // Find which memory mapping methods are supported by the GPU
         supported_mapping_methods_mask = (1 << static_cast<int>(MappingMethod::Disabled));
         if (support_memory_mapping) {
@@ -589,13 +629,19 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
                 support_external_memory = (props.get<vk::PhysicalDeviceExternalMemoryHostPropertiesEXT>().minImportedHostPointerAlignment <= 4096);
             }
 
-            if (support_external_memory)
+            if (support_external_memory || unsafe_tegra_mapping_override)
                 supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::ExernalHost));
 
 #ifdef ANDROID
-            if (support_android_buffer_import || support_unix_fd_import)
+            if (support_android_buffer_import || support_unix_fd_import || unsafe_tegra_mapping_override)
                 supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::NativeBuffer));
 #endif
+        }
+
+        if (forced_mapping_override) {
+            supported_mapping_methods_mask |= (1 << static_cast<int>(*forced_mapping_override));
+            mapping_method = *forced_mapping_override;
+            LOG_WARN("Forcing mapping method from VITA3K_FORCE_MAPPING_METHOD={}", std::getenv("VITA3K_FORCE_MAPPING_METHOD"));
         }
 
         if (physical_device_properties.vendorID == 4318) {
@@ -833,7 +879,11 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
         request_mapping = MappingMethod::NativeBuffer;
     const std::string_view mapping_string[] = { "Disabled", "Double buffer", "External Host", "Page Table", "Native Buffer" };
 
-    if ((1 << static_cast<int>(request_mapping)) & supported_mapping_methods_mask)
+    const auto forced_mapping_override = parse_mapping_override(std::getenv("VITA3K_FORCE_MAPPING_METHOD"));
+    if (forced_mapping_override) {
+        mapping_method = *forced_mapping_override;
+        LOG_WARN("Unsafe mapping override selected at runtime: {}", std::getenv("VITA3K_FORCE_MAPPING_METHOD"));
+    } else if ((1 << static_cast<int>(request_mapping)) & supported_mapping_methods_mask)
         // we support the requested mapping method
         mapping_method = request_mapping;
 

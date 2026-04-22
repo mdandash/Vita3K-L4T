@@ -30,6 +30,8 @@
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
+#include <cstdlib>
+
 #include <gui/functions.h>
 #include <gui/state.h>
 
@@ -869,7 +871,9 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
             ImGui::SetTooltip("%s", lang.gpu["fps_hack_description"].c_str());
         }
 
-        if (emuenv.renderer->supported_mapping_methods_mask > 1 && !is_renderer_changed) {
+        const bool force_show_mapping_methods = std::getenv("VITA3K_SHOW_ALL_MAPPING_METHODS") != nullptr
+            || std::getenv("VITA3K_FORCE_MAPPING_METHOD") != nullptr;
+        if ((emuenv.renderer->supported_mapping_methods_mask > 1 || force_show_mapping_methods) && !is_renderer_changed) {
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -892,14 +896,16 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
                 "native-buffer"
             };
 
-            // only get the mapping methods that are available on this GPU
-            int list_pos = 0;
-            for (int i = 0; i < 5; i++) {
-                if ((1 << i) & emuenv.renderer->supported_mapping_methods_mask) {
-                    list_pos++;
-                } else {
-                    mapping_methods_strings.erase(mapping_methods_strings.begin() + list_pos);
-                    mapping_methods_indexes.erase(mapping_methods_indexes.begin() + list_pos);
+            // only get the mapping methods that are available on this GPU unless we explicitly force the full list
+            if (!force_show_mapping_methods) {
+                int list_pos = 0;
+                for (int i = 0; i < 5; i++) {
+                    if ((1 << i) & emuenv.renderer->supported_mapping_methods_mask) {
+                        list_pos++;
+                    } else {
+                        mapping_methods_strings.erase(mapping_methods_strings.begin() + list_pos);
+                        mapping_methods_indexes.erase(mapping_methods_indexes.begin() + list_pos);
+                    }
                 }
             }
 
